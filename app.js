@@ -520,6 +520,61 @@
     skipBeforeUnload: false,
   };
 
+  // Keep the display awake only while a game or its results are on screen.
+  // Wake locks are released by the browser when the document is hidden, so
+  // request them again when the app becomes visible. Unsupported browsers
+  // simply continue without this optional feature.
+  let screenWakeLock = null;
+  let wakeLockRequestPending = false;
+
+  function isGameScreenActive() {
+    return state.screen === 'playing' || state.screen === 'finale';
+  }
+
+  async function releaseScreenWakeLock() {
+    const lock = screenWakeLock;
+    screenWakeLock = null;
+    if (lock) {
+      try {
+        await lock.release();
+      } catch (_) {}
+    }
+  }
+
+  async function syncScreenWakeLock() {
+    if (!isGameScreenActive() || document.visibilityState !== 'visible') {
+      await releaseScreenWakeLock();
+      return;
+    }
+    if (!('wakeLock' in navigator) || screenWakeLock || wakeLockRequestPending) return;
+
+    wakeLockRequestPending = true;
+    try {
+      const lock = await navigator.wakeLock.request('screen');
+      // The screen may have changed while the asynchronous request was pending.
+      if (!isGameScreenActive() || document.visibilityState !== 'visible') {
+        await lock.release().catch(function () {});
+        return;
+      }
+      screenWakeLock = lock;
+      lock.addEventListener('release', function () {
+        if (screenWakeLock === lock) {
+          screenWakeLock = null;
+          // A release can be browser initiated; retry while the game remains visible.
+          if (isGameScreenActive() && document.visibilityState === 'visible') {
+            syncScreenWakeLock();
+          }
+        }
+      });
+    } catch (_) {
+      // Permission, platform, or transient errors must not affect gameplay.
+    } finally {
+      wakeLockRequestPending = false;
+    }
+  }
+
+  document.addEventListener('visibilitychange', syncScreenWakeLock);
+
   let toastTimer = null;
   function showToast(msg) {
     state.toast = msg;
@@ -1599,6 +1654,7 @@
   }
 
   function render() {
+    syncScreenWakeLock();
     const t = I18N[state.lang];
     document.documentElement.lang = state.lang;
     document.title = t.docTitle;
